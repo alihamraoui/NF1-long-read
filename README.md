@@ -4,24 +4,24 @@ NF1 Single-cell RNA isoform analysis
 Arborescence :
 
 .
-├── 1_metadata
-│   └── 1_make_metadata.Rmd
-├── 2_individual
-│   ├── 1_make_individual.Rmd
-│   ├── dataset
-│   └── input
-│       ├── TITI
-│       │   ├── Illumina
-│       │   └── Nanopore
-│       └── TOTO
-│           ├── Illumina
-│           └── Nanopore
-├── 3_combined
-│   └── 1_combined_all.Rmd
-├── 4_isoforms
-│   ├── 1_analysis.Rmd
-│   └── 2_visualisation.Rmd
-└── README.md
+├── 1_metadata\
+│   └── 1_make_metadata.Rmd\
+├── 2_individual\
+│   ├── 1_make_individual.Rmd\
+│   ├── dataset\
+│   └── input\
+│       ├── TITI\
+│       │   ├── Illumina\
+│       │   └── Nanopore\
+│       └── TOTO\
+│           ├── Illumina\
+│           └── Nanopore\
+├── 3_combined\
+│   └── 1_combined_all.Rmd\
+├── 4_isoforms\
+│   ├── 1_analysis.Rmd\
+│   └── 2_visualisation.Rmd\
+└── README.md\
 
 
 **1_metadata** :*
