@@ -1,0 +1,205 @@
+---
+title: "Mice"
+subtitle: "Tumor cells trajectory using TInGa"
+author: "Audrey"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output:
+  html_document:
+    code_folding: show
+    code_download: true
+    toc: true
+    toc_float: true
+    number_sections: false
+---
+
+<style>
+body {
+text-align: justify}
+</style>
+
+<!-- Automatically computes and prints in the output the running time for any code chunk -->
+```{r, echo=FALSE}
+# https://github.com/rstudio/rmarkdown/issues/1453
+hooks = knitr::knit_hooks$get()
+hook_foldable = function(type) {
+  force(type)
+  function(x, options) {
+    res = hooks[[type]](x, options)
+    
+    if (isFALSE(options[[paste0("fold_", type)]])) return(res)
+    
+    paste0(
+      "<details><summary>", "show", "</summary>\n\n",
+      res,
+      "\n\n</details>"
+    )
+  }
+}
+knitr::knit_hooks$set(
+  output = hook_foldable("output"),
+  plot = hook_foldable("plot"),
+  time_it = local({
+    now = NULL
+    function(before, options) {
+      if (options$time_it) {
+        if (before) {
+          now <<- Sys.time()
+        } else {
+          res = difftime(Sys.time(), now, units = "secs")
+          paste("(Time to run :", round(res, digits = 2), "s)")
+        }
+      }
+    }
+  })
+)
+```
+
+<!-- Set default parameters for all chunks -->
+```{r, setup, include = FALSE}
+set.seed(1337L)
+knitr::opts_chunk$set(echo = TRUE, # display code
+                      # display chunk output
+                      message = FALSE,
+                      warning = FALSE,
+                      fold_output = FALSE, # usefull for sessionInfo()
+                      fold_plot = FALSE,
+                      
+                      # figure settings
+                      fig.align = 'center',
+                      fig.width = 20,
+                      fig.height = 15,
+                      
+                      # something about seed, chunk and Rmarkdown compilation
+                      # https://stackoverflow.com/questions/39417003/long-vectors-not-supported-yet-error-in-rmd-but-not-in-r-script
+                      # cache = TRUE,
+                      cache.lazy = FALSE, 
+                      
+                      # add runtime after chunk
+                      time_it = FALSE)
+```
+
+This script is used to infer trajectory on tumor cells, using TInGa.
+
+```{r library}
+library(dplyr)
+library(patchwork)
+library(ggplot2)
+source("./plot_label_dimplot.R")
+source("./traj_tinga.R")
+
+.libPaths()
+```
+
+
+# Preparation
+
+In this section, we set the global settings of the analysis. We will store data there :
+
+```{r out_dir}
+save_name = "nf1_tumor_cells_subset"
+out_dir = "."
+```
+
+We load the sample information :
+
+```{r custom_palette_sample, fig.width = 8, fig.height = 8}
+sample_info = readRDS(paste0(out_dir, "/../1_metadata/nf1_sample_info.rds"))
+
+project_names_oi = sample_info$project_name
+
+graphics::pie(rep(1, nrow(sample_info)),
+              col = sample_info$color,
+              labels = sample_info$project_name)
+```
+
+This are the settings for trajectory inference :
+
+```{r traj_settings}
+traj_dimred = "mnn"          # to infer trajectory on
+traj_umap = "mnn_dm_umap"    # just of visualization
+seed = 1337L
+traj_max_dims = 40           # to infer trajectory on
+```
+
+We load the Seurat object :
+
+```{r load_sobj}
+sobj = readRDS(paste0(out_dir, "/", save_name, "_sobj.rds"))
+sobj
+```
+
+
+# Trajectory inference
+
+We set the root manually :
+
+```{r root_cell, fig.width = 3, fig.height = 3}
+root_cell_id = "2020_26_TGTGGCGAGTCAACAA"
+root_cell_id = "2020_26_CACTGAAGTACTAACC"
+root_cell_id = "2020_26_CACAACATCATGAGGG"
+sobj$is_root = colnames(sobj) == root_cell_id
+sobj$cell_name = colnames(sobj)
+root_plot = plot_label_dimplot(sobj, reduction = traj_umap,
+                               col_by = "is_root", col_color = c("gray80", "red"),
+                               label_by = "cell_name", label_val = root_cell_id) +
+  ggplot2::ggtitle("Root cell") +
+  ggplot2::theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+                 aspect.ratio = 1) +
+  Seurat::NoLegend() + Seurat::NoAxes()
+
+sobj$is_root = NULL
+sobj$cell_name = NULL
+
+root_plot
+```
+
+Now, we perform the trajectory inference :
+
+```{r tinga, cache = FALSE, time_it = TRUE}
+set.seed(seed)
+my_traj = traj_tinga(sobj,
+                     seed = seed,
+                     expression_assay = "RNA",
+                     expression_slot = "data",
+                     count_assay = "RNA",
+                     count_slot = "counts",
+                     dimred_name = traj_dimred,
+                     dimred_max_dim = traj_max_dims,
+                     root_cell_id = root_cell_id,
+                     tinga_parameters = list(max_nodes = 5))
+
+## Add pseudotime
+sobj$pseudotime = my_traj$pseudotime
+```
+
+# Visualization
+
+We visualize pseudotime :
+
+```{r pseudotime1, fig.width = 3, fig.height = 3}
+Seurat::FeaturePlot(sobj, features = "pseudotime",
+                    reduction = traj_umap) +
+  ggplot2::scale_color_gradientn(colors = rev(RColorBrewer::brewer.pal(name = "Spectral", n = 10))) +
+  ggplot2::ggtitle("Pseudotime") +
+  ggplot2::theme(aspect.ratio = 1,
+                 plot.title = element_text(hjust = 0.5)) +
+  Seurat::NoAxes()
+```
+
+
+
+# Save
+
+We save the Seurat object :
+
+```{r save_sobj}
+saveRDS(sobj, file = paste0(out_dir, "/", save_name, "_sobj_traj_tinga.rds"))
+```
+
+
+# R Session
+
+```{r sessioninfo, echo = FALSE, fold_output = TRUE}
+sessionInfo()
+```
+

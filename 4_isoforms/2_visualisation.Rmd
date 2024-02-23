@@ -1,0 +1,379 @@
+---
+title: "NF1 long-read"
+subtitle: "Isoforms differential expression (visualisation)"
+author: "Ali Hamraoui & Audrey Onfroy"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output:
+  html_document:
+    code_folding: show
+    code_download: true
+    toc: true
+    toc_float: true
+    number_sections: false
+---
+
+<style>
+body {
+text-align: justify}
+</style>
+
+<!-- Automatically computes and prints in the output the running time for any code chunk -->
+```{r, echo=FALSE}
+# https://github.com/rstudio/rmarkdown/issues/1453
+hooks = knitr::knit_hooks$get()
+hook_foldable = function(type) {
+  force(type)
+  function(x, options) {
+    res = hooks[[type]](x, options)
+    
+    if (isFALSE(options[[paste0("fold_", type)]])) return(res)
+    
+    paste0(
+      "<details><summary>", "show", "</summary>\n\n",
+      res,
+      "\n\n</details>"
+    )
+  }
+}
+knitr::knit_hooks$set(
+  output = hook_foldable("output"),
+  plot = hook_foldable("plot")
+)
+```
+
+<!-- Set default parameters for all chunks -->
+```{r, setup, include = FALSE}
+set.seed(1337L)
+knitr::opts_chunk$set(echo = TRUE, # display code
+                      # display chunk output
+                      message = FALSE,
+                      warning = FALSE,
+                      fold_output = FALSE, # for sessionInfo()
+                      fold_plot = FALSE,
+                      
+                      # figure settings
+                      fig.align = 'center',
+                      fig.width = 20,
+                      fig.height = 15)
+```
+
+This file is used to explore ways to visualize differentially expressed isoforms.
+
+```{r library}
+library(dplyr)
+library(patchwork)
+library(ggplot2)
+library(biomaRt)
+library(stringr)
+library(reactable)
+
+.libPaths()
+```
+
+# Preparation
+
+In this section, we set the global settings of the analysis. We will store data there :
+
+```{r out_dir}
+save_name = "nf1"
+sample_name = "2020_23"
+out_dir = "."
+```
+
+We load the sample information :
+
+```{r color_markers, fig.width = 12, fig.height = 1, class.source = "fold-hide"}
+color_markers = readRDS(paste0(out_dir, "/../1_metadata/nf1_color_markers.rds"))
+
+data.frame(cell_type = names(color_markers),
+           color = unlist(color_markers)) %>%
+  ggplot2::ggplot(., aes(x = cell_type, y = 0, fill = cell_type)) +
+  ggplot2::geom_point(pch = 21, size = 5) +
+  ggplot2::scale_fill_manual(values = unlist(color_markers), breaks = names(color_markers)) +
+  ggplot2::theme_classic() +
+  ggplot2::theme(legend.position = "none",
+                 axis.line = element_blank(),
+                 axis.title = element_blank(),
+                 axis.ticks = element_blank(),
+                 axis.text.y = element_blank())
+```
+
+```{r custom_palette_sample, fig.width = 8, fig.height = 8}
+sample_info = readRDS(paste0(out_dir, "/../1_metadata/nf1_sample_info.rds"))
+
+#graphics::pie(rep(1, nrow(sample_info)),
+#              col = sample_info$color,
+#              labels = sample_info$project_name)
+```
+
+We load the Seurat object :
+
+```{r load_sobj}
+#seurat_obj = readRDS(paste0(out_dir, "/../3_combined/", save_name, "_sobj.rds"))
+seurat_obj = readRDS(paste0(out_dir, "/../2_individual/datasets/", sample_name , "_seurat_obj_filtered.rds"))
+seurat_obj
+```
+
+This is the projection of interest :
+
+```{r name2D}
+name2D = "RNA_pca_20_umap"
+```
+
+We load the DE isoforms table :
+
+```{r load_switch_markers}
+switch_markers = readRDS(paste0(out_dir, "/", save_name, "_switch_markers.rds"))
+```
+
+We set a custom functions to visualize isoforms expression levels for a given gene :
+
+```{r see_isoforms_expression, class.source = "fold-hide"}
+see_isoforms_expression = function(sobj, gene) {
+  isoforms = grep(paste0("^", gene, "\\."), rownames(sobj), value = TRUE, limits)
+  
+  plot_list = lapply(isoforms, FUN = function(one_isoform) {
+    p = Seurat::FeaturePlot(sobj, features = one_isoform,
+                            reduction = name2D) +
+      ggplot2::labs(title = one_isoform) +
+      ggplot2::scale_color_gradientn(limits = limits, colors = c("lightgray", "#FDBB84", "#EF6548", "#7F0000", "black")) +
+      ggplot2::theme(aspect.ratio = 1,
+                     plot.subtitle = element_text(hjust = 0.5)) +
+      Seurat::NoAxes()
+    return(p)
+  })
+  
+  return(plot_list)
+}
+```
+
+# Dataset
+
+We visualize cells :
+
+```{r see_cells, fig.width = 12, fig.height = 6, class.source = "fold-hide"}
+cell_type = Seurat::DimPlot(seurat_obj, reduction = name2D, group.by = "cell_type") +
+  ggplot2::scale_color_manual(values = unlist(color_markers),
+                              breaks = names(color_markers)) +
+  ggplot2::labs(title = sample_name,
+                subtitle = paste0(ncol(seurat_obj), " cells")) +
+  Seurat::NoLegend() + Seurat::NoAxes() +
+  ggplot2::theme(aspect.ratio = 1,
+                 plot.title = element_text(hjust = 0.5),
+                 plot.subtitle = element_text(hjust = 0.5))
+
+clusters = Seurat::DimPlot(seurat_obj, group.by = "seurat_clusters", label = TRUE,
+                           reduction = name2D) +
+  Seurat::NoAxes() + ggplot2::ggtitle("Clustering") +
+  ggplot2::theme(aspect.ratio = 1,
+                 plot.title = element_text(hjust = 0.5))
+
+clusters | cell_type
+```
+
+# DE isoforms visualisation
+
+In this section, we explore the `switch_marker` dataframe.
+
+## Title
+
+```{r plot_marker_score, fig.height=4, fig.width=8}
+#isoswitch::plot_marker_score(seurat_obj, switch_markers, ncol=3)
+levels(seurat_obj) <- c(0,1,2,3,4,5,6,7,8)
+pl1 <- isoswitch::plot_marker_matrix(seurat_obj, switch_markers) 
+pl2 <- isoswitch::plot_marker_score(seurat_obj, switch_markers, facet=FALSE, overlaps=16)
+pl1 | pl2 
+```
+
+```{r gene_switch_table, fig.height = 8, fig.width = 15}
+isoswitch::gene_switch_table(switch_markers)
+```
+
+## Heatmap
+
+We represent a heatmap for top 50 DE isoforms :
+
+```{r top50, fig.height = 20, fig.width = 10}
+top = switch_markers %>%
+  group_by(cluster) %>%
+  dplyr::filter(abs(p_val) < 0.05) %>%
+  dplyr::filter(abs(avg_log2FC) > 2) %>%
+  dplyr::filter(pct.1 > 0.1 | pct.2 > 0.1) %>%
+  ungroup()
+
+levels(seurat_obj) <- c(4,2,1,6,0,3,5,7,8)
+#pdf(file = "Heatmap.pdf",
+#    height = 20, width = 10)
+Seurat::DoHeatmap(seurat_obj, features = sort(top$feature), assay = "ISO") 
+#dev.off()
+```
+
+## Specific genes
+
+We visualize isoforms expression levels for specific genes. First, we set the assay to "ISO" because all expression levels are stored there.
+
+```{r set_default_assay}
+Seurat::DefaultAssay(seurat_obj) = "ISO"
+```
+
+For Cirbp :
+
+```{r}
+see_isoforms_expression = function(sobj, gene, limits) {
+  isoforms = grep(paste0("^", gene, "\\."), rownames(sobj), value = TRUE)
+  
+  plot_list = lapply(isoforms, FUN = function(one_isoform) {
+    p = Seurat::FeaturePlot(sobj, features = one_isoform, order = F,
+                            reduction = name2D) +
+      ggplot2::labs(title = one_isoform) +
+      ggplot2::scale_color_gradientn(limits = limits, colors = c("lightgray", "#FDBB84", "#EF6548", "#7F0000", "black")) +
+      ggplot2::theme(aspect.ratio = 1,
+                     plot.subtitle = element_text(hjust = 0.5)) +
+      Seurat::NoAxes()
+    return(p)
+  })
+  
+  return(plot_list)
+}
+```
+
+
+```{r fig.height=4, fig.width=4}
+Seurat::FeaturePlot(seurat_obj, 'Hnrnpa1', reduction = "RNA_pca_20_umap")+
+      ggplot2::scale_color_gradientn(limits = c(0,4), colors = c("lightgray", "#FDBB84", "#EF6548", "#7F0000", "black")) +
+      ggplot2::theme(aspect.ratio = 1,
+                     plot.subtitle = element_text(hjust = 0.5)) +
+      Seurat::NoAxes()
+```
+```{r fig.height=14, fig.width=20}
+see_isoforms_expression(seurat_obj, "Hnrnpa1", limits=c(0,4)) %>%
+  patchwork::wrap_plots(., ncol = 3)
+```
+
+```{r fig.height=10, fig.width=10}
+see_isoforms_expression(seurat_obj, "Srsf3", limits=c(0,4)) %>%
+  patchwork::wrap_plots(., ncol = 3)
+```
+
+
+```{r see_cdkn2c, fig.width = 20, fig.height = 8}
+see_isoforms_expression(seurat_obj, "Srsf3", limits=c(0,4)) %>%
+  patchwork::wrap_plots(., ncol = 3)
+```
+```{r fig.width = 14, fig.height = 4}
+Seurat::FeaturePlot(seurat_obj, reduction = "RNA_pca_20_umap", features = c("Cirbp..ENSMUST00000054666", "Cirbp..ENSMUST00000105365"), 
+                    blend = TRUE, order = TRUE, min.cutoff = 0, max.cutoff = 5)
+```
+
+
+
+For Cdkn2c :
+
+```{r see_cdkn2c, fig.width = 14, fig.height = 4}
+see_isoforms_expression(seurat_obj, "Cdkn2c",c(0,4)) %>%
+  patchwork::wrap_plots(., ncol = 3)
+```
+
+```{r fig.height=6, fig.width=20}
+Seurat::FeaturePlot(seurat_obj, reduction = "RNA_pca_20_umap", features = c("Cdkn2c..ENSMUST00000097921", "Cdkn2c..ENSMUST00000063531"), blend = TRUE, order = TRUE)
+```
+
+For Hn1 :
+
+```{r see_rpm39, fig.width = 12, fig.height = 6}
+see_isoforms_expression(seurat_obj, "Fus") %>%
+  patchwork::wrap_plots(., ncol = 3)
+```
+
+For Hn1 : 
+
+```{r see_rpm39, fig.width = 12, fig.height = 6} 
+#pdf(file = "Hn1.pdf",
+#    width = 12,
+#    height = 6)
+see_isoforms_expression(seurat_obj, "Hn1",c(0,4))  %>%
+  patchwork::wrap_plots(., ncol = 3) 
+#dev.off
+```
+
+DotPlot
+
+```{r fig.height=6, fig.width=12}
+features <- c("Cdkn2c", "Fus", "Rpm36", "Hn1")
+Seurat::DotPlot(seurat_obj, features = sort(unique(switch_markers[switch_markers$geneId %in% features, "feature"])) ) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+
+
+```{r}
+library(gprofiler2)
+mmus_s = gorth(Seurat::cc.genes.updated.2019$s.genes, source_organism = "hsapiens", target_organism = "mmusculus")$ortholog_name
+mmus_g2m = gorth(Seurat::cc.genes.updated.2019$g2m.genes, source_organism = "hsapiens", target_organism = "mmusculus")$ortholog_name
+```
+
+
+```{r fig.height=4, fig.width=4}
+seurat_obj <- Seurat::CellCycleScoring(seurat_obj, assay="RNA", g2m.features = mmus_g2m, s.features = mmus_s)
+Seurat::DimPlot(seurat_obj, reduction = "RNA_pca_20_umap",
+        group.by= "Phase")
+```
+
+
+# Report
+
+In this section, we generate a report.
+
+%%% remettre en forme cette section :
+- generaliser les chemins par rapport au dépôt Github, et pas en absolu
+- mettre les noms des packages devant les fonctions (traçabilité)
+
+```{r}
+gtf = rtracklayer::import('/Users/hamraoui/Analyses/genes.gtf') 
+gtf_df = as.data.frame(gtf) %>%
+  dplyr::select(seqnames, start, end, strand, type, gene_name, transcript_id, transcript_name, transcript_biotype, tag) %>%
+  mutate(transcript_id = str_extract(transcript_id, ".*?(?=\\.)"))
+saveRDS(gtf_df, "/Users/hamraoui/Analyses/iso_switch/gtf_rds.rds")
+```
+
+```{r}
+
+
+ensembl = useEnsembl(biomart = "genes", dataset = "mmusculus_gene_ensembl")
+
+# pulls gene names from RNA & isoform assays,
+#seurat = readRDS("./seurat_object.rds")
+gene_list = rownames(seurat_obj@assays$RNA)
+
+# Gene-level metadata
+gene_metadata = getBM(attributes = c('external_gene_name', 'ensembl_gene_id', 'description','gene_biotype','transcript_count', 'entrezgene_id'),
+                      filters = 'external_gene_name',
+                      values = gene_list, 
+                      mart = ensembl)
+
+# Transcript metadata
+transcript_metadata = getBM(attributes = c('external_gene_name', 'ensembl_transcript_id','external_transcript_name', 'transcript_biotype','transcript_is_canonical'),
+                            filters = 'external_gene_name',
+                            values = gene_list,
+                            mart = ensembl)
+
+cds_lenghts = getBM(attributes = c('ensembl_transcript_id','cds_length'),
+                    filters = 'external_gene_name',
+                    values = gene_list,
+                    mart = ensembl)
+
+transcript_metadata = merge(transcript_metadata, cds_lenghts)
+
+saveRDS(gene_metadata, "/Users/hamraoui/Analyses/iso_switch/gene_metadata.rds")
+saveRDS(transcript_metadata, "/Users/hamraoui/Analyses/iso_switch/transcript_metadata.rds")
+```
+
+```{r}
+isoswitch_report_short(seurat_obj, obj_assay="ISO", gene="Cdkn2c", marker_list=switch_markers, transcript_metadata=transcript_metadata) #, gtf_df=gtf_df, transcript_metadata=transcript_metadata) 
+```
+
+# R Session
+
+```{r sessioninfo, echo = FALSE, fold_output = TRUE}
+sessionInfo()
+```

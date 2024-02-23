@@ -1,0 +1,504 @@
+---
+title: "NF1 long-read"
+subtitle: "Combined dataset"
+author: "Ali Hamraoui & Audrey Onfroy"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output:
+  html_document:
+    code_folding: show
+    code_download: true
+    toc: true
+    toc_float: true
+    number_sections: false
+---
+
+<style>
+body {
+text-align: justify}
+</style>
+
+<!-- Automatically computes and prints in the output the running time for any code chunk -->
+```{r, echo=FALSE}
+# https://github.com/rstudio/rmarkdown/issues/1453
+hooks = knitr::knit_hooks$get()
+hook_foldable = function(type) {
+  force(type)
+  function(x, options) {
+    res = hooks[[type]](x, options)
+    
+    if (isFALSE(options[[paste0("fold_", type)]])) return(res)
+    
+    paste0(
+      "<details><summary>", "show", "</summary>\n\n",
+      res,
+      "\n\n</details>"
+    )
+  }
+}
+knitr::knit_hooks$set(
+  output = hook_foldable("output"),
+  plot = hook_foldable("plot")
+)
+```
+
+<!-- Set default parameters for all chunks -->
+```{r, setup, include = FALSE}
+set.seed(1)
+knitr::opts_chunk$set(echo = TRUE, # display code
+                      # display chunk output
+                      message = FALSE,
+                      warning = FALSE,
+                      fold_output = FALSE, # for sessionInfo()
+                      fold_plot = FALSE,
+                      
+                      # figure settings
+                      fig.align = 'center',
+                      fig.width = 20,
+                      fig.height = 15)
+```
+
+
+This file is used to generate a dataset containing all individual datasets.
+
+```{r library}
+library(dplyr)
+library(patchwork)
+library(ggplot2)
+library(ComplexHeatmap)
+
+.libPaths()
+```
+
+
+# Preparation
+
+In this section, we set the global settings of the analysis. We will store data there :
+
+```{r out_dir}
+save_name = "nf1"
+out_dir = "."
+n_threads = 5
+```
+
+
+We load the sample information :
+
+```{r custom_palette_sample, fig.width = 5, fig.height = 5}
+sample_info = readRDS(paste0(out_dir, "/../1_metadata/nf1_sample_info.rds"))
+project_names_oi = sample_info$project_name
+
+graphics::pie(rep(1, nrow(sample_info)),
+              col = sample_info$color,
+              labels = sample_info$project_name)
+```
+
+Here are custom colors for each cell type :
+
+```{r color_markers, fig.width = 10, fig.height = 1, class.source = "fold-hide"}
+color_markers = readRDS(paste0(out_dir, "/../1_metadata/nf1_color_markers.rds"))
+
+data.frame(cell_type = names(color_markers),
+           color = unlist(color_markers)) %>%
+  ggplot2::ggplot(., aes(x = cell_type, y = 0, fill = cell_type)) +
+  ggplot2::geom_point(pch = 21, size = 5) +
+  ggplot2::scale_fill_manual(values = unlist(color_markers), breaks = names(color_markers)) +
+  ggplot2::theme_classic() +
+  ggplot2::theme(legend.position = "none",
+                 axis.line = element_blank(),
+                 axis.title = element_blank(),
+                 axis.ticks = element_blank(),
+                 axis.text.y = element_blank())
+```
+
+We load the markers and specific colors for each cell type :
+
+```{r cell_markers}
+cell_markers = readRDS(paste0(out_dir, "/../1_metadata/nf1_cell_markers.rds"))
+lengths(cell_markers)
+```
+
+We load markers to display on the dotplot :
+
+```{r dotplot_markers}
+dotplot_markers = readRDS(paste0(out_dir, "/../1_metadata/nf1_dotplot_markers.rds"))
+dotplot_markers
+```
+
+# Make `r save_name` dataset
+
+## Individual datasets
+
+For each sample, we :
+
+* load individual dataset
+* look at cell annotation
+
+We load individual datasets :
+
+```{r seurat_obj_list}
+seurat_obj_list = lapply(project_names_oi, FUN = function(one_project_name) {
+  subseurat_obj = readRDS(paste0(out_dir, "/../2_individual/datasets/",
+                                 one_project_name, "_seurat_obj_filtered.rds"))
+  return(subseurat_obj)
+})
+names(seurat_obj_list) = project_names_oi
+
+lapply(seurat_obj_list, FUN = dim) %>%
+  do.call(rbind, .) %>%
+  rbind(., colSums(.))
+```
+
+
+We represent cells in the UMAP :
+
+```{r name2D}
+name2D = "RNA_pca_20_umap"
+```
+
+
+We look at cell type annotation for each dataset :
+
+```{r cell_type_proj, fig.width = 12, fig.height = 6}
+plot_list = lapply(seurat_obj_list, FUN = function(one_seurat_obj) {
+  mytitle = as.character(unique(one_seurat_obj$project_name))
+  mysubtitle = ncol(one_seurat_obj)
+  
+  p = Seurat::DimPlot(one_seurat_obj, group.by = "cell_type",
+                      reduction = name2D) +
+    ggplot2::scale_color_manual(values = color_markers,
+                                breaks = names(color_markers),
+                                name = "Cell Type") +
+    ggplot2::labs(title = mytitle,
+                  subtitle = paste0(mysubtitle, " cells")) +
+    ggplot2::theme(aspect.ratio = 1,
+                   plot.title = element_text(hjust = 0.5),
+                   plot.subtitle = element_text(hjust = 0.5)) +
+    Seurat::NoAxes()
+  
+  return(p)
+})
+
+plot_list[[length(plot_list) + 1]] = patchwork::guide_area()
+
+patchwork::wrap_plots(plot_list, nrow = 1) +
+  patchwork::plot_layout(guides = "collect") &
+  ggplot2::theme(legend.position = "right")
+```
+
+
+and clustering :
+
+
+```{r clustering_proj, fig.width = 12, fig.height = 6}
+plot_list = lapply(seurat_obj_list, FUN = function(one_seurat_obj) {
+  mytitle = as.character(unique(one_seurat_obj$project_name))
+  mysubtitle = ncol(one_seurat_obj)
+  
+  p = Seurat::DimPlot(one_seurat_obj, group.by = "seurat_clusters",
+                      reduction = name2D, label = TRUE) +
+    ggplot2::labs(title = mytitle,
+                  subtitle = paste0(mysubtitle, " cells")) +
+    ggplot2::theme(aspect.ratio = 1,
+                   plot.title = element_text(hjust = 0.5),
+                   plot.subtitle = element_text(hjust = 0.5)) +
+    Seurat::NoAxes() + Seurat::NoLegend()
+  
+  return(p)
+})
+
+patchwork::wrap_plots(plot_list, nrow = 1)
+```
+
+## Combined dataset
+
+We combine all datasets :
+
+```{r merge_datasets}
+seurat_obj = base::merge(seurat_obj_list[[1]],
+                         y = seurat_obj_list[c(2:length(seurat_obj_list))],
+                         add.cell.ids = names(seurat_obj_list))
+Seurat::DefaultAssay(seurat_obj) = "RNA"
+
+seurat_obj
+```
+
+We add again the correspondence between gene names and gene ID :
+
+```{r add_metafeatures}
+seurat_obj@assays$RNA@meta.features = seurat_obj_list[[2]]@assays$RNA@meta.features[, c("Ensembl_ID", "gene_name")]
+
+head(seurat_obj@assays$RNA@meta.features)
+```
+
+We remove the list of objects :
+
+```{r clean_seurat_obj_list}
+rm(seurat_obj_list)
+```
+
+We keep a subset of meta.data and reset levels :
+
+```{r seurat_obj_set_factor_levels}
+seurat_obj@meta.data = seurat_obj@meta.data[, c("orig.ident", "nCount_RNA", "nFeature_RNA", "log_nCount_RNA",
+                                                "project_name", "sample_identifier", "sample_type",
+                                                "percent.mt", "percent.rb",
+                                                "cell_type")]
+
+seurat_obj$orig.ident = factor(seurat_obj$orig.ident, levels = levels(sample_info$project_name))
+seurat_obj$project_name = factor(seurat_obj$project_name, levels = levels(sample_info$project_name))
+seurat_obj$sample_identifier = factor(seurat_obj$sample_identifier, levels = levels(sample_info$sample_identifier))
+seurat_obj$sample_type = factor(seurat_obj$sample_type, levels = levels(sample_info$sample_type))
+seurat_obj$cell_type = factor(seurat_obj$cell_type, levels = names(color_markers))
+
+summary(seurat_obj@meta.data)
+```
+
+# Processing
+
+## Metadata
+
+How many cells by sample ?
+
+```{r table_orig_ident}
+table(seurat_obj$project_name)
+```
+
+## Projection
+
+We normalize the count matrix for remaining cells and select highly variable features :
+
+```{r normalization}
+seurat_obj = Seurat::NormalizeData(seurat_obj,
+                                   normalization.method = "LogNormalize", assay = "RNA")
+seurat_obj = Seurat::FindVariableFeatures(seurat_obj, nfeatures = 2000, assay = "RNA")
+
+seurat_obj
+```
+
+We perform a PCA :
+
+```{r pca}
+seurat_obj = Seurat::ScaleData(seurat_obj,
+                               features = rownames(seurat_obj), assay = "RNA", verbose = F)
+var_features = Seurat::VariableFeatures(object = seurat_obj)
+
+seurat_obj = Seurat::RunPCA(seurat_obj, features = var_features,
+                            assay = "RNA",
+                            reduction.name = "RNA_pca",
+                            #npcs = 20,
+                            seed.use = 1)
+seurat_obj
+```
+
+We choose the number of dimensions such that they summarize 60 % of the variability :
+
+```{r ndims}
+stdev = seurat_obj@reductions[["RNA_pca"]]@stdev
+stdev_prop = cumsum(stdev)/sum(stdev)
+ndims = which(stdev_prop > 0.60)[1]
+ndims
+```
+
+We can visualize this on the elbow plot :
+
+```{r elbowplot, fig.width = 12, fig.height = 4}
+elbow_p = Seurat::ElbowPlot(seurat_obj, ndims = 100, reduction = "RNA_pca") +
+  ggplot2::geom_point(x = ndims, y = stdev[ndims], col = "red")
+x_text = ggplot_build(elbow_p)$layout$panel_params[[1]]$x$get_labels() %>% as.numeric()
+elbow_p = elbow_p +
+  ggplot2::scale_x_continuous(breaks = sort(c(x_text, ndims)), limits = c(0, 100))
+x_color = ifelse(ggplot_build(elbow_p)$layout$panel_params[[1]]$x$get_labels() %>%
+                   as.numeric() %>% round(., 2) == round(ndims, 2), "red", "black")
+elbow_p = elbow_p +
+  ggplot2::theme_classic() +
+  ggplot2::theme(axis.text.x = element_text(color = x_color))
+
+elbow_p
+```
+
+We generate a tSNE and a UMAP with `r ndims` principal components :
+
+```{r tsne_umap, time_it = TRUE}
+seurat_obj = Seurat::RunTSNE(seurat_obj,
+                             reduction = "RNA_pca",
+                             dims = 1:ndims,
+                             seed.use = 1,
+                             num_threads = n_threads, # Rtsne::Rtsne option
+                             reduction.name = paste0("RNA_pca_", ndims, "_tsne"))
+
+seurat_obj = Seurat::RunUMAP(seurat_obj,
+                             reduction = "RNA_pca",
+                             dims = 1:ndims,
+                             seed.use = 1,
+                             reduction.name = paste0("RNA_pca_", ndims, "_umap"))
+```
+
+We can visualize the two representations :
+
+```{r see_umap_tsne, fig.width = 8, fig.height = 4, class.source = "fold-hide"}
+tsne = Seurat::DimPlot(seurat_obj, group.by = "project_name",
+                       reduction = paste0("RNA_pca_", ndims, "_tsne")) +
+  ggplot2::scale_color_manual(values = sample_info$color,
+                              breaks = sample_info$project_name) +
+  Seurat::NoAxes() + ggplot2::ggtitle("PCA - tSNE") +
+  ggplot2::theme(aspect.ratio = 1,
+                 plot.title = element_text(hjust = 0.5),
+                 legend.position = "none")
+
+umap = Seurat::DimPlot(seurat_obj, group.by = "project_name",
+                       reduction = paste0("RNA_pca_", ndims, "_umap")) +
+  ggplot2::scale_color_manual(values = sample_info$color,
+                              breaks = sample_info$project_name) +
+  Seurat::NoAxes() + ggplot2::ggtitle("PCA - UMAP") +
+  ggplot2::theme(aspect.ratio = 1,
+                 plot.title = element_text(hjust = 0.5))
+
+tsne | umap
+```
+
+## Batch-effect correction
+
+We remove sample specific effect on the pca using Harmony :
+
+```{r harmony, fig.width = 8, fig.height = 5, time_it = TRUE}
+`%||%` = function(lhs, rhs) {
+  if (!is.null(x = lhs)) {
+    return(lhs)
+  } else {
+    return(rhs)
+  }
+}
+
+set.seed(1)
+seurat_obj = harmony::RunHarmony(object = seurat_obj,
+                                 group.by.vars = "project_name",
+                                 plot_convergence = TRUE,
+                                 reduction = "RNA_pca",
+                                 assay.use = "RNA",
+                                 reduction.save = "harmony",
+                                 max.iter.harmony = 50,
+                                 project.dim = FALSE)
+```
+
+From this batch-effect removed projection, we generate a tSNE and a UMAP.
+
+```{r harmony_tsne_umap, time_it = TRUE}
+seurat_obj = Seurat::RunUMAP(seurat_obj, 
+                             seed.use = 1,
+                             dims = 1:ndims,
+                             reduction = "harmony",
+                             reduction.name = paste0("harmony_", ndims, "_umap"),
+                             reduction.key = paste0("harmony_", ndims, "umap_"))
+
+seurat_obj = Seurat::RunTSNE(seurat_obj,
+                             dims = 1:ndims,
+                             seed.use = 1,
+                             num_threads = n_threads, # Rtsne::Rtsne option
+                             reduction = "harmony",
+                             reduction.name = paste0("harmony_", ndims, "_tsne"),
+                             reduction.key = paste0("harmony", ndims, "tsne_"))
+```
+
+We visualize the corrected projections :
+
+```{r see_umap_tsne_after, fig.width = 8, fig.height = 4, class.source = "fold-hide"}
+tsne = Seurat::DimPlot(seurat_obj, group.by = "project_name",
+                       reduction = paste0("harmony_", ndims, "_tsne")) +
+  ggplot2::scale_color_manual(values = sample_info$color,
+                              breaks = sample_info$project_name) +
+  Seurat::NoAxes() + ggplot2::ggtitle("PCA - harmony - tSNE") +
+  ggplot2::theme(aspect.ratio = 1,
+                 plot.title = element_text(hjust = 0.5),
+                 legend.position = "none")
+
+umap = Seurat::DimPlot(seurat_obj, group.by = "project_name",
+                       reduction = paste0("harmony_", ndims, "_umap")) +
+  ggplot2::scale_color_manual(values = sample_info$color,
+                              breaks = sample_info$project_name) +
+  Seurat::NoAxes() + ggplot2::ggtitle("PCA - harmony - UMAP") +
+  ggplot2::theme(aspect.ratio = 1,
+                 plot.title = element_text(hjust = 0.5))
+
+tsne | umap
+```
+
+We will keep the tSNE from harmony :
+
+```{r set_name2D}
+reduction = "harmony"
+name2D = paste0("harmony_", ndims, "_tsne")
+```
+
+
+## Clustering
+
+We generate a clustering :
+
+```{r clustering, fig.width = 6, fig.height = 6}
+seurat_obj = Seurat::FindNeighbors(seurat_obj, reduction = reduction, dims = 1:ndims)
+seurat_obj = Seurat::FindClusters(seurat_obj, resolution = 1)
+
+clusters_plot = Seurat::DimPlot(seurat_obj, reduction = name2D, label = TRUE) +
+  Seurat::NoAxes() + Seurat::NoLegend() +
+  ggplot2::labs(title = "Clusters ID") +
+  ggplot2::theme(aspect.ratio = 1,
+                 plot.title = element_text(hjust = 0.5))
+clusters_plot
+```
+
+
+# Visualization
+
+We represent the 4 quality metrics :
+
+```{r qc_plot, fig.width = 12, fig.height = 3}
+plot_list = Seurat::FeaturePlot(seurat_obj, reduction = name2D,
+                                combine = FALSE, pt.size = 0.25,
+                                features = c("percent.mt", "percent.rb", "log_nCount_RNA", "nFeature_RNA"))
+plot_list = lapply(plot_list, FUN = function(one_plot) {
+  one_plot +
+    Seurat::NoAxes() +
+    ggplot2::scale_color_gradientn(colors = c("lightgray", "#FDBB84", "#EF6548", "#7F0000", "black")) +
+    ggplot2::theme(aspect.ratio = 1)
+})
+
+patchwork::wrap_plots(plot_list, nrow = 1)
+```
+
+## Cell type
+
+We visualize cell type :
+
+```{r see_cell_type, fig.width = 15, fig.height = 8}
+plot_list = lapply((c(paste0("RNA_pca_", ndims, "_tsne"),
+                      paste0("RNA_pca_", ndims, "_umap"),
+                      paste0("harmony_", ndims, "_tsne"),
+                      paste0("harmony_", ndims, "_umap"))),
+                   FUN = function(one_red) {
+                     Seurat::DimPlot(seurat_obj, group.by = "cell_type",
+                                     reduction = one_red,
+                                     cols = color_markers) +
+                       Seurat::NoAxes() + ggplot2::ggtitle(one_red) +
+                       ggplot2::theme(aspect.ratio = 1,
+                                      plot.title = element_text(hjust = 0.5))
+                   })
+
+patchwork::wrap_plots(plot_list, nrow = 2) +
+  patchwork::plot_layout(guides = "collect")
+```
+
+# Save
+
+We save the Seurat object :
+
+```{r save_seurat_obj}
+saveRDS(seurat_obj, file = paste0(out_dir, "/", save_name, "_seurat_obj.rds"))
+```
+
+
+# R Session
+
+```{r sessioninfo, echo = FALSE, fold_output = TRUE}
+sessionInfo()
+```
+

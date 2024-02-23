@@ -1,0 +1,60 @@
+
+```{r}
+plot_marker_score(seurat_obj, switch_markers2, facet=TRUE, ncol=3)
+```
+
+```{r fig.height=8, fig.width=15}
+gene_switch_table(switch_markers)
+```
+
+
+
+
+
+
+
+```{r}
+library(stringr)
+gtf = rtracklayer::import('/Users/hamraoui/Analyses/genes.gtf') 
+gtf_df = as.data.frame(gtf) %>%
+  dplyr::select(seqnames, start, end, strand, type, gene_name, transcript_id, transcript_name, transcript_biotype, tag) %>%
+  mutate(transcript_id = str_extract(transcript_id, ".*?(?=\\.)"))
+saveRDS(gtf_df, "/Users/hamraoui/Analyses/iso_switch/gtf_rds.rds")
+```
+
+```{r}
+library(biomaRt)
+library(stringr)
+
+ensembl = useEnsembl(biomart = "genes", dataset = "mmusculus_gene_ensembl")
+
+# pulls gene names from RNA & isoform assays,
+#seurat = readRDS("./seurat_object.rds")
+gene_list = rownames(seurat_obj@assays$RNA)
+
+# Gene-level metadata
+gene_metadata = getBM(attributes = c('external_gene_name', 'ensembl_gene_id', 'description','gene_biotype','transcript_count', 'entrezgene_id'),
+                       filters = 'external_gene_name',
+                       values = gene_list, 
+                       mart = ensembl)
+
+# Transcript metadata
+transcript_metadata = getBM(attributes = c('external_gene_name', 'ensembl_transcript_id','external_transcript_name', 'transcript_biotype','transcript_is_canonical'),
+                             filters = 'external_gene_name',
+                             values = gene_list,
+                             mart = ensembl)
+
+cds_lenghts = getBM(attributes = c('ensembl_transcript_id','cds_length'),
+                             filters = 'external_gene_name',
+                             values = gene_list,
+                             mart = ensembl)
+
+transcript_metadata = merge(transcript_metadata, cds_lenghts)
+
+saveRDS(gene_metadata, "/Users/hamraoui/Analyses/iso_switch/gene_metadata.rds")
+saveRDS(transcript_metadata, "/Users/hamraoui/Analyses/iso_switch/transcript_metadata.rds")
+```
+
+```{r}
+isoswitch_report_short(seurat_obj, obj_assay="ISO", gene="Cdkn2c", marker_list=switch_markers, transcript_metadata=transcript_metadata) #, gtf_df=gtf_df, transcript_metadata=transcript_metadata) 
+```

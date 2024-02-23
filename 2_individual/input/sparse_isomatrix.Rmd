@@ -1,0 +1,88 @@
+---
+title: "sparse_isomatrix"
+author: "Ali Hamraoui"
+date: "2024-01-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Preparation
+
+In this section, we set the global settings of the analysis. We will store data there :
+
+```{r out_dir}
+out_dir = "."
+```
+
+We load the parameters :
+
+```{r get_param}
+#sample_name = params$sample_name # "TOTO"
+sample_name = "2020_23"
+```
+
+Input count matrices are there :
+
+```{r count_matrix_dir}
+count_matrix_dir = paste0(out_dir, "/", sample_name)
+```
+
+We load isoform matrix :
+
+```{r load_iso_cm}
+iso.mtx = read.csv(paste0(count_matrix_dir, "/isoforms/promethION_isomatrix.txt"), sep = '\t', header = T)
+dim(iso.mtx)
+```
+
+We load features (gene ids and names):
+
+```{r load features}
+features_df = read.csv(paste0(count_matrix_dir, "/genes/raw_feature_bc_matrix/features.tsv.gz"), sep = "\t", header = 0)
+features_df = features_df[, c(1:2)]
+colnames(features_df) = c("geneId", "gene_name")
+```
+
+## Filtering
+
+we filter isoform matrix for undef and create a sparse matrix
+
+```{r filter}
+library(Matrix)
+
+iso.mtx = iso.mtx[iso.mtx$transcriptId != "undef",]
+
+if (table(iso.mtx$geneId %in% features_df$geneId)["TRUE"] > 10){
+  iso.mtx <- iso.mtx[iso.mtx$geneId %in% features_df$geneId, ]
+  iso.mtx <- merge(iso.mtx, features_df, by = "geneId", all.x = TRUE)
+  col = "gene_name"
+} else {col = "geneId"}
+
+iso.mtx$iso_id = apply(iso.mtx[ , c(col,"transcriptId") ] , 1 , paste , collapse = ".." )
+
+rownames(iso.mtx) <- iso.mtx$iso_id
+
+transcrips <- iso.mtx$transcriptId
+
+iso.mtx = iso.mtx[, !colnames(iso.mtx)%in%c("geneId","transcriptId","nbExons","iso_id", "gene_name")]
+
+iso.mtx <- as(iso.mtx, "sparseMatrix") 
+```
+
+## Save
+
+```{r save}
+DropletUtils::write10xCounts(
+  paste0(count_matrix_dir, "/isoforms/isoform_matrix/"),
+  iso.mtx,
+  barcodes = colnames(iso.mtx),
+  gene.id = transcrips,
+  gene.symbol = rownames(iso.mtx),
+  gene.type = "Isoform",
+  overwrite = FALSE,
+  type = "sparse",
+  genome = "mouse",
+)
+```

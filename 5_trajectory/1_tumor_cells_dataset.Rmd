@@ -1,0 +1,636 @@
+---
+title: "Mice"
+subtitle: "Tumor cells subdataset"
+author: "Audrey"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output:
+  html_document:
+    code_folding: show
+    code_download: true
+    toc: true
+    toc_float: true
+    number_sections: false
+---
+
+<style>
+body {
+text-align: justify}
+</style>
+
+<!-- Automatically computes and prints in the output the running time for any code chunk -->
+```{r, echo=FALSE}
+# https://github.com/rstudio/rmarkdown/issues/1453
+hooks = knitr::knit_hooks$get()
+hook_foldable = function(type) {
+  force(type)
+  function(x, options) {
+    res = hooks[[type]](x, options)
+    
+    if (isFALSE(options[[paste0("fold_", type)]])) return(res)
+    
+    paste0(
+      "<details><summary>", "show", "</summary>\n\n",
+      res,
+      "\n\n</details>"
+    )
+  }
+}
+knitr::knit_hooks$set(
+  output = hook_foldable("output"),
+  plot = hook_foldable("plot"),
+  time_it = local({
+    now = NULL
+    function(before, options) {
+      if (options$time_it) {
+        if (before) {
+          now <<- Sys.time()
+        } else {
+          res = difftime(Sys.time(), now, units = "secs")
+          paste("(Time to run :", round(res, digits = 2), "s)")
+        }
+      }
+    }
+  })
+)
+```
+
+<!-- Set default parameters for all chunks -->
+```{r, setup, include = FALSE}
+set.seed(1337L)
+knitr::opts_chunk$set(echo = TRUE, # display code
+                      # display chunk output
+                      message = FALSE,
+                      warning = FALSE,
+                      fold_output = FALSE, # usefull for sessionInfo()
+                      fold_plot = FALSE,
+                      
+                      # figure settings
+                      fig.align = 'center',
+                      fig.width = 20,
+                      fig.height = 15,
+                      
+                      # something about seed, chunk and Rmarkdown compilation
+                      # https://stackoverflow.com/questions/39417003/long-vectors-not-supported-yet-error-in-rmd-but-not-in-r-script
+                      # cache = TRUE,
+                      cache.lazy = FALSE, 
+                      
+                      # add runtime after chunk
+                      time_it = FALSE)
+```
+
+This script is used to filter out tumor cells with too many UMI related to mitochondrial genes. The goal is then to run trajectory inference on the remaining "good quality" cells.
+
+```{r library}
+library(patchwork)
+library(ggplot2)
+library(dplyr)
+source("./integration_fastmnn.R")
+source("./run_diffusion_map.R")
+
+.libPaths()
+```
+
+# Preparation
+
+In this section, we set the global settings of the analysis. We will store data there :
+
+```{r out_dir}
+save_name = "nf1_tumor_cells_subset"
+out_dir = "."
+n_threads = 3 # for tSNE
+percent_mt_thresh = 10
+```
+
+
+We load the sample information :
+
+```{r custom_palette_sample, fig.width = 8, fig.height = 8}
+sample_info = readRDS(paste0(out_dir, "/../1_metadata/nf1_sample_info.rds"))
+
+project_names_oi = sample_info$project_name
+
+graphics::pie(rep(1, nrow(sample_info)),
+              col = sample_info$color,
+              labels = sample_info$project_name)
+```
+
+Here are custom colors for each cell type :
+
+```{r color_markers, fig.width = 10, fig.height = 1, class.source = "fold-hide"}
+color_markers = readRDS(paste0(out_dir, "/../1_metadata/nf1_color_markers.rds"))
+
+data.frame(cell_type = names(color_markers),
+           color = unlist(color_markers)) %>%
+  ggplot2::ggplot(., aes(x = cell_type, y = 0, fill = cell_type)) +
+  ggplot2::geom_point(pch = 21, size = 5) +
+  ggplot2::scale_fill_manual(values = unlist(color_markers), breaks = names(color_markers)) +
+  ggplot2::theme_classic() +
+  ggplot2::theme(legend.position = "none",
+                 axis.line = element_blank(),
+                 axis.title = element_blank(),
+                 axis.ticks = element_blank(),
+                 axis.text.y = element_blank())
+```
+
+# Subset tumor cells
+
+## Individual datasets
+
+We extract a cluster annotated as `r save_name` in each dataset. For each sample, we :
+
+* load individual dataset
+* look at `r save_name` markers
+* look at `r save_name` score for each cluster
+* select the best clusters based on average `r save_name` score
+
+We load individual datasets :
+
+```{r sobj_list}
+sobj_list = lapply(project_names_oi, FUN = function(one_project_name) {
+  message(one_project_name)
+  subsobj = readRDS(paste0(out_dir, "/../2_individual/datasets/",
+                           one_project_name, "_seurat_obj_filtered.rds"))
+  Seurat::DefaultAssay(subsobj) = "RNA"
+  
+  return(subsobj)
+})
+names(sobj_list) = project_names_oi
+
+lapply(sobj_list, FUN = dim) %>%
+  do.call(rbind, .)
+```
+
+
+We smooth cell type annotation at a cluster level :
+
+```{r smooth_annotation}
+sobj_list = lapply(sobj_list, FUN = function(one_sobj) {
+  one_sobj$cell_type = factor(one_sobj$cell_type,
+                              levels = names(color_markers))
+  cluster_type = table(one_sobj$cell_type, one_sobj$seurat_clusters) %>%
+    prop.table(., margin = 2) %>%
+    apply(., 2, which.max)
+  cluster_type = setNames(nm = names(cluster_type),
+                          levels(one_sobj$cell_type)[cluster_type])
+  
+  one_sobj$cluster_type = unname(cluster_type[one_sobj$seurat_clusters])
+  
+  ## Output
+  return(one_sobj)
+})
+```
+
+
+We represent cells in the tSNE :
+
+```{r name2D}
+name2D = "RNA_pca_20_tsne"
+```
+
+
+To locate tumor cells, we look at Tomato expression levels, cell type annotation, and clustering as information.
+
+```{r gene_expression, class.source = "fold-hide", fig.width = 12, fig.height = 8}
+plot_list = lapply(sobj_list, FUN = function(one_sobj) {
+  project_name = as.character(unique(one_sobj$project_name))
+  plot_sublist = list()
+  
+  # Tomato
+  plot_sublist[[1]] = Seurat::FeaturePlot(one_sobj, reduction = name2D,
+                                          features = "dtTomato") +
+    ggplot2::labs(title = project_name,
+                  subtitle = "Tomato expression") +
+    Seurat::NoAxes() +
+    ggplot2::scale_color_gradientn(colors = c("lightgray", "#FDBB84", "#EF6548", "#7F0000", "black")) +
+    ggplot2::theme(aspect.ratio = 1,
+                   plot.subtitle = element_text(hjust = 0.5))
+  
+  # Cell type
+  plot_sublist[[2]] = Seurat::DimPlot(one_sobj,
+                                      reduction = name2D,
+                                      group.by = "cell_type",
+                                      cols = color_markers) +
+    ggplot2::labs(title = "Cell type annotation",
+                  subtitle = paste0(sum(one_sobj$cell_type == "tumor cells"),
+                                    " tumor cells")) +
+    Seurat::NoAxes() + Seurat::NoLegend() +
+    ggplot2::theme(aspect.ratio = 1,
+                   plot.title = element_text(hjust = 0.5),
+                   plot.subtitle = element_text(hjust = 0.5))
+  
+  # Clusters
+  plot_sublist[[3]] = Seurat::DimPlot(one_sobj,
+                                      reduction = name2D,
+                                      group.by = "seurat_clusters",
+                                      label = TRUE) +
+    ggplot2::labs(title = "Clusters") +
+    Seurat::NoAxes() + Seurat::NoLegend() +
+    ggplot2::theme(aspect.ratio = 1,
+                   plot.title = element_text(hjust = 0.5),
+                   plot.subtitle = element_text(hjust = 0.5))
+  
+  # Cluster type
+  plot_sublist[[4]] = Seurat::DimPlot(one_sobj,
+                                      reduction = name2D,
+                                      group.by = "cluster_type",
+                                      cols = color_markers) +
+    ggplot2::labs(title = "Cluster annotation",
+                  subtitle = paste0(sum(one_sobj$cluster_type == "tumor cells"),
+                                    " tumor cells")) +
+    Seurat::NoAxes() + Seurat::NoLegend() +
+    ggplot2::theme(aspect.ratio = 1,
+                   plot.title = element_text(hjust = 0.5),
+                   plot.subtitle = element_text(hjust = 0.5))
+  
+  return(plot_sublist)
+}) %>% unlist(., recursive = FALSE)
+
+patchwork::wrap_plots(plot_list, ncol = 4)
+```
+
+
+We select cells based on cluster annotation.
+
+```{r add_is_of_interest}
+sobj_list = lapply(sobj_list, FUN = function(one_sobj) {
+  one_sobj$is_of_interest = (one_sobj$cluster_type == "tumor cells")
+  
+  return(one_sobj)
+})
+```
+
+
+## Combined dataset
+
+For each sample, we extract cells of interest based on clusters mean score, and build a new dataset.
+
+```{r subset_is_of_interest}
+sobj_list = lapply(sobj_list, FUN = function(one_sobj) {
+  if (sum(one_sobj$is_of_interest) > 0) {
+    one_sobj = subset(one_sobj, is_of_interest == TRUE)
+  } else {
+    one_sobj = NA
+  }
+  return(one_sobj)
+})
+
+lapply(sobj_list, FUN = dim) %>%
+  do.call(rbind, .) %>%
+  rbind(., colSums(.))
+```
+
+For each sample, we remove cells with too many UMI related to mitochondrial genes.
+
+```{r subset_mito}
+sobj_list = lapply(sobj_list, FUN = function(one_sobj) {
+  one_sobj$is_of_interest = (one_sobj$percent.mt < percent_mt_thresh)
+  
+  if (sum(one_sobj$is_of_interest) > 0) {
+    one_sobj = subset(one_sobj, is_of_interest == TRUE)
+  } else {
+    one_sobj = NA
+  }
+  
+  return(one_sobj)
+})
+
+lapply(sobj_list, FUN = dim) %>%
+  do.call(rbind, .) %>%
+  rbind(., colSums(.))
+```
+
+We combine all datasets :
+
+```{r merge_datasets}
+sobj = base::merge(sobj_list[[1]],
+                   y = sobj_list[c(2:length(sobj_list))],
+                   add.cell.ids = project_names_oi)
+
+sobj
+```
+
+We add again the correspondence between gene names and gene ID.
+
+```{r add_metafeatures}
+sobj@assays$RNA@meta.features = sobj_list[[2]]@assays$RNA@meta.features[, c("Ensembl_ID", "gene_name")]
+
+head(sobj@assays$RNA@meta.features)
+```
+
+We remove the list of objects :
+
+```{r clean_sobj_list}
+rm(sobj_list)
+```
+
+We set factor levels in metadata :
+
+```{r sobj_set_factor_levels}
+# new_cols = sample_info %>%
+#   dplyr::select(-origin, -color, -gender) %>%
+#   colnames()
+# new_cols = new_cols[which(new_cols != "project_name")]
+# 
+# avail_cols = colnames(sobj@meta.data)[colnames(sobj@meta.data) %in% colnames(sample_info)]
+# sobj@meta.data[, avail_cols] = NULL
+# 
+# sobj$orig.ident = factor(sobj$orig.ident,
+#                          levels = levels(sample_info$project_name))
+# sobj@meta.data[, new_cols] = dplyr::left_join(sobj@meta.data,
+#                                               sample_info %>%
+#                                                 dplyr::select(-origin, -color, -gender),
+#                                               by = c("orig.ident" = "project_name")) %>%
+#   dplyr::select(dplyr::all_of(new_cols)) %>%
+#   dplyr::relocate(new_cols)
+# sobj$project_name = sobj$orig.ident
+# 
+# sobj$cell_type = factor(as.character(sobj$cell_type),
+#                         levels = names(color_markers))
+# 
+# summary(sobj@meta.data)
+```
+
+How many cells by sample ?
+
+```{r table_orig_ident}
+table(sobj$project_name)
+```
+
+
+We clean this dataset :
+
+```{r clean_dataset}
+column_of_interest = c("orig.ident", "sample_type", "project_name",
+                       "genotype", "tumor_type", "sample_identifier",
+                       "nCount_RNA", "nFeature_RNA", "log_nCount_RNA",
+                       "percent.mt", "percent.rb", "percent.st")
+
+sobj@meta.data[!(colnames(sobj@meta.data) %in% column_of_interest)] = NULL
+```
+
+
+# Processing
+
+## Normalization
+
+We normalize gene expression :
+
+```{r normalization}
+sobj = Seurat::NormalizeData(sobj,
+                             normalization.method = "LogNormalize")
+sobj = Seurat::FindVariableFeatures(sobj, nfeatures = 2000)
+sobj = Seurat::ScaleData(sobj)
+
+sobj
+```
+
+## Non-corrected projection
+
+We perform a PCA :
+
+```{r pca}
+sobj = Seurat::RunPCA(sobj,
+                      assay = "RNA",
+                      reduction.name = "RNA_pca",
+                      npcs = 100,
+                      seed.use = 1337L)
+sobj
+```
+
+We choose the number of dimensions such that they summarize 60 % of the variability :
+
+```{r ndims}
+stdev = sobj@reductions[["RNA_pca"]]@stdev
+stdev_prop = cumsum(stdev)/sum(stdev)
+ndims = which(stdev_prop > 0.60)[1]
+ndims
+```
+
+We can visualize this on the elbow plot :
+
+```{r elbowplot, fig.width = 12, fig.height = 4}
+elbow_p = Seurat::ElbowPlot(sobj, ndims = 100, reduction = "RNA_pca") +
+  ggplot2::geom_point(x = ndims, y = stdev[ndims], col = "red")
+x_text = ggplot_build(elbow_p)$layout$panel_params[[1]]$x$get_labels() %>% as.numeric()
+elbow_p = elbow_p +
+  ggplot2::scale_x_continuous(breaks = sort(c(x_text, ndims)), limits = c(0, 100))
+x_color = ifelse(ggplot_build(elbow_p)$layout$panel_params[[1]]$x$get_labels() %>%
+                   as.numeric() %>% round(., 2) == round(ndims, 2), "red", "black")
+elbow_p = elbow_p +
+  ggplot2::theme_classic() +
+  ggplot2::theme(axis.text.x = element_text(color = x_color))
+
+elbow_p
+```
+
+We generate a tSNE and a UMAP with `r ndims` principal components :
+
+```{r tsne_umap}
+sobj = Seurat::RunTSNE(sobj,
+                       reduction = "RNA_pca",
+                       dims = 1:ndims,
+                       seed.use = 1337L,
+                       num_threads = n_threads, # Rtsne::Rtsne option
+                       reduction.name = paste0("RNA_pca_", ndims, "_tsne"))
+
+sobj = Seurat::RunUMAP(sobj,
+                       reduction = "RNA_pca",
+                       dims = 1:ndims,
+                       seed.use = 1337L,
+                       reduction.name = paste0("RNA_pca_", ndims, "_umap"))
+```
+
+We can visualize the two representations. There is a batch effect :
+
+```{r see_umap_tsne, fig.width = 8, fig.height = 4, class.source = "fold-hide"}
+tsne = Seurat::DimPlot(sobj, group.by = "project_name",
+                       reduction = paste0("RNA_pca_", ndims, "_tsne")) +
+  ggplot2::scale_color_manual(values = sample_info$color,
+                              breaks = sample_info$project_name) +
+  Seurat::NoAxes() + ggplot2::ggtitle("PCA - tSNE") +
+  ggplot2::theme(aspect.ratio = 1,
+                 plot.title = element_text(hjust = 0.5),
+                 legend.position = "none")
+
+umap = Seurat::DimPlot(sobj, group.by = "project_name",
+                       reduction = paste0("RNA_pca_", ndims, "_umap")) +
+  ggplot2::scale_color_manual(values = sample_info$color,
+                              breaks = sample_info$project_name) +
+  Seurat::NoAxes() + ggplot2::ggtitle("PCA - UMAP") +
+  ggplot2::theme(aspect.ratio = 1,
+                 plot.title = element_text(hjust = 0.5))
+
+tsne | umap
+```
+
+
+## Batch-effect correction
+
+We remove sample-specific effect with FastMNN :
+
+```{r fastmnn}
+sobj_mnn = Seurat::SplitObject(sobj,
+                               split.by = "project_name")
+sobj_mnn = integration_fastmnn(object.list = sobj_mnn,
+                               assay = "RNA",
+                               verbose = TRUE,
+                               d = 100)
+
+sobj@assays[["mnn.reconstructed"]] = sobj_mnn@assays[["mnn.reconstructed"]]
+sobj@reductions[["mnn"]] = sobj_mnn@reductions[["mnn"]]
+reduction_name = "mnn"
+
+rm(sobj_mnn)
+
+sobj
+```
+
+## Clustering
+
+We make a clustering on the batch-effect corrected space :
+
+```{r clustering}
+sobj = Seurat::FindNeighbors(sobj, reduction = reduction_name)
+sobj = Seurat::FindClusters(sobj, resolution = 1)
+```
+
+## UMAP and tSNE
+
+To visualize subpopulations, we run UMAP and tSNE :
+
+```{r mnn_tsne_umap}
+sobj = Seurat::RunTSNE(sobj,
+                       reduction = reduction_name,
+                       dims = 1:ndims,
+                       seed.use = 1337L,
+                       num_threads = n_threads, # Rtsne::Rtsne option
+                       reduction.name = paste0(reduction_name, "_", ndims, "_tsne"))
+
+sobj = Seurat::RunUMAP(sobj,
+                       reduction = reduction_name,
+                       dims = 1:ndims,
+                       seed.use = 1337L,
+                       reduction.name = paste0(reduction_name, "_", ndims, "_umap"))
+```
+
+We can visualize the two representations :
+
+```{r see_mnn_umap_tsne, fig.width = 8, fig.height = 4}
+tsne = Seurat::DimPlot(sobj, group.by = "project_name",
+                       reduction = paste0(reduction_name, "_", ndims, "_tsne")) +
+  ggplot2::scale_color_manual(values = sample_info$color,
+                              breaks = sample_info$project_name) +
+  Seurat::NoAxes() + ggplot2::ggtitle("MNN - tSNE") +
+  ggplot2::theme(aspect.ratio = 1,
+                 plot.title = element_text(hjust = 0.5),
+                 legend.position = "none")
+
+umap = Seurat::DimPlot(sobj, group.by = "project_name",
+                       reduction = paste0(reduction_name, "_", ndims, "_umap")) +
+  ggplot2::scale_color_manual(values = sample_info$color,
+                              breaks = sample_info$project_name) +
+  Seurat::NoAxes() + ggplot2::ggtitle("MNN - UMAP") +
+  ggplot2::theme(aspect.ratio = 1,
+                 plot.title = element_text(hjust = 0.5))
+
+tsne | umap
+```
+
+## Trajectory projection
+
+Just for the visualization, we generate a diffusion map :
+
+```{r dm, fig.width = 8, fig.height = 8}
+sobj = run_diffusion_map(sobj = sobj,
+                         input = reduction_name,
+                         seed = 1337L,
+                         verbose = TRUE,
+                         n_eigs = 50,
+                         suppress_dpt = TRUE,
+                         return_dm = FALSE)
+
+dm_name = paste0(reduction_name, "_dm")
+
+Seurat::DimPlot(sobj, reduction = dm_name,
+                group.by = "project_name") +
+  ggplot2::scale_color_manual(values = sample_info$color,
+                              breaks = sample_info$project_name) +
+  ggplot2::labs(title = dm_name) +
+  ggplot2::theme(aspect.ratio = 1,
+                 plot.title = element_text(hjust = 0.5)) +
+  Seurat::NoAxes()
+```
+
+We generate a UMAP from this diffusion map :
+
+```{r dm_umap}
+umap_dm_dims = 3
+
+if (paste0(dm_name, "_umap") %in% names(sobj@reductions)) {
+  sobj[[paste0(dm_name, "_umap")]] = NULL
+}
+sobj = Seurat::RunUMAP(sobj, reduction = dm_name,
+                       dims = 1:umap_dm_dims,
+                       reduction.name = paste0(dm_name, "_umap"),
+                       verbose = TRUE, seed.use = 1337L)
+```
+
+# Visualization
+
+We use this projection :
+
+```{r set_traj_umap}
+traj_umap = paste0(dm_name, "_umap")
+```
+
+
+This is the clustering :
+
+```{r see_clusters, fig.width = 8, fig.height = 8}
+Seurat::DimPlot(sobj, reduction = traj_umap,
+                group.by = "seurat_clusters", label = TRUE) +
+  ggplot2::labs(title = traj_umap) +
+  ggplot2::theme(aspect.ratio = 1,
+                 plot.title = element_text(hjust = 0.5)) +
+  Seurat::NoAxes()
+```
+
+This is the trajectory UMAP, colored by sample of origin :
+
+```{r dm_umap_visu, fig.width = 3, fig.height = 3}
+Seurat::DimPlot(sobj, reduction = traj_umap,
+                group.by = "project_name") +
+  ggplot2::scale_color_manual(values = sample_info$color,
+                              breaks = sample_info$project_name) +
+  ggplot2::labs(title = traj_umap) +
+  ggplot2::theme(aspect.ratio = 1,
+                 plot.title = element_text(hjust = 0.5)) +
+  Seurat::NoAxes()
+```
+
+We represent gene expression levels :
+
+```{r tomato, fig.width = 3, fig.height = 3}
+Seurat::FeaturePlot(sobj, features = "Sox10",
+                    reduction = traj_umap) +
+  ggplot2::scale_color_gradientn(colors = c("lightgray", "#FDBB84", "#EF6548", "#7F0000", "black")) +
+  ggplot2::theme(aspect.ratio = 1,
+                 plot.subtitle = element_text(hjust = 0.5)) +
+  Seurat::NoAxes()
+```
+
+# Save
+
+We save the tumor cells dataset :
+
+```{r save_sobj, fig.width = 12, fig.height = 12}
+saveRDS(sobj, file = paste0(out_dir, "/", save_name, "_sobj.rds"))
+```
+
+
+# R Session
+
+```{r sessioninfo, echo = FALSE, fold_output = TRUE}
+sessionInfo()
+```
+

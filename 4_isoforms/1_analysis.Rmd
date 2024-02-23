@@ -1,0 +1,195 @@
+---
+title: "NF1 long-read"
+subtitle: "Isoforms differential expression (analysis)"
+author: "Ali Hamraoui & Audrey Onfroy"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output:
+  html_document:
+    code_folding: show
+    code_download: true
+    toc: true
+    toc_float: true
+    number_sections: false
+---
+
+<style>
+body {
+text-align: justify}
+</style>
+
+<!-- Automatically computes and prints in the output the running time for any code chunk -->
+```{r, echo=FALSE}
+# https://github.com/rstudio/rmarkdown/issues/1453
+hooks = knitr::knit_hooks$get()
+hook_foldable = function(type) {
+  force(type)
+  function(x, options) {
+    res = hooks[[type]](x, options)
+    
+    if (isFALSE(options[[paste0("fold_", type)]])) return(res)
+    
+    paste0(
+      "<details><summary>", "show", "</summary>\n\n",
+      res,
+      "\n\n</details>"
+    )
+  }
+}
+knitr::knit_hooks$set(
+  output = hook_foldable("output"),
+  plot = hook_foldable("plot")
+)
+```
+
+<!-- Set default parameters for all chunks -->
+```{r, setup, include = FALSE}
+set.seed(1337L)
+knitr::opts_chunk$set(echo = TRUE, # display code
+                      # display chunk output
+                      message = FALSE,
+                      warning = FALSE,
+                      fold_output = FALSE, # for sessionInfo()
+                      fold_plot = FALSE,
+                      
+                      # figure settings
+                      fig.align = 'center',
+                      fig.width = 20,
+                      fig.height = 15)
+```
+
+This file is used to identify differentially expressed isoforms.
+
+```{r library}
+library(dplyr)
+library(patchwork)
+library(ggplot2)
+
+.libPaths()
+```
+
+# Preparation
+
+In this section, we set the global settings of the analysis. We will store data there :
+
+```{r out_dir}
+save_name = "nf1"
+sample_name = "2020_23"
+out_dir = "."
+```
+
+We load the sample information :
+
+```{r custom_palette_sample, fig.width = 8, fig.height = 8}
+sample_info = readRDS(paste0(out_dir, "/../1_metadata/nf1_sample_info.rds"))
+
+graphics::pie(rep(1, nrow(sample_info)),
+              col = sample_info$color,
+              labels = sample_info$project_name)
+```
+
+Here are custom colors for each cell type :
+
+```{r color_markers, fig.width = 12, fig.height = 1, class.source = "fold-hide"}
+color_markers = readRDS(paste0(out_dir, "/../1_metadata/nf1_color_markers.rds"))
+
+data.frame(cell_type = names(color_markers),
+           color = unlist(color_markers)) %>%
+  ggplot2::ggplot(., aes(x = cell_type, y = 0, fill = cell_type)) +
+  ggplot2::geom_point(pch = 21, size = 5) +
+  ggplot2::scale_fill_manual(values = unlist(color_markers), breaks = names(color_markers)) +
+  ggplot2::theme_classic() +
+  ggplot2::theme(legend.position = "none",
+                 axis.line = element_blank(),
+                 axis.title = element_blank(),
+                 axis.ticks = element_blank(),
+                 axis.text.y = element_blank())
+```
+
+We load the Seurat object :
+
+```{r load_sobj}
+#seurat_obj = readRDS(paste0(out_dir, "/../3_combined/", save_name, "_seurat_obj.rds"))
+seurat_obj = readRDS(paste0(out_dir, "/../2_individual/datasets/", sample_name , "_seurat_obj_filtered.rds"))
+
+seurat_obj
+```
+
+This is the projection of interest :
+
+```{r name2D}
+name2D =  "RNA_pca_20_umap" #"harmony_19_tsne" #"RNA_pca_20_umap"
+```
+
+
+# Dataset
+
+We visualize cells :
+
+```{r see_cells, fig.width = 12, fig.height = 6, class.source = "fold-hide"}
+cell_type = Seurat::DimPlot(seurat_obj, reduction = name2D, group.by = "cell_type") +
+  ggplot2::scale_color_manual(values = unlist(color_markers),
+                              breaks = names(color_markers)) +
+  ggplot2::labs(title = sample_name,
+                subtitle = paste0(ncol(seurat_obj), " cells")) +
+  Seurat::NoLegend() + Seurat::NoAxes() +
+  ggplot2::theme(aspect.ratio = 1,
+                 plot.title = element_text(hjust = 0.5),
+                 plot.subtitle = element_text(hjust = 0.5))
+
+clusters = Seurat::DimPlot(seurat_obj, group.by = "seurat_clusters", label = TRUE,
+                           reduction = name2D) +
+  Seurat::NoAxes() + ggplot2::ggtitle("Clustering") +
+  ggplot2::theme(aspect.ratio = 1,
+                 plot.title = element_text(hjust = 0.5))
+
+clusters | cell_type
+```
+
+# Isoforms DE
+
+In this section, we use `isoswitch` package to perform differential expression for isoforms.
+
+## Between pair of clusters
+
+We perform differential expression for isoforms, between each pair of clusters :
+
+```{r ide}
+clusters = levels(seurat_obj@active.ident)
+switch_markers = isoswitch::ISO_SWITCH_ALL(seurat_obj, clusters, assay = "ISO", 
+                                           min.pct = 0, logfc.threshold = 0.40)
+
+head(switch_markers)
+```
+
+We visualize the number of DE isoforms between each cluster :
+
+```{r plot_marker_matrix, fig.height=6, fig.width=12}
+pl1 = isoswitch::plot_marker_matrix(seurat_obj, switch_markers) 
+switch_markers2 = switch_markers[!is.infinite(switch_markers$avg_log2FC),]
+pl2 = isoswitch::plot_marker_score(seurat_obj, switch_markers, )
+pl1 | pl2
+```
+
+## Within tumor cells
+
+We perform differential expression for isoforms, within tumor cells, between one cluster and all others. The goal is to identify cluster-specific isoforms.
+
+%%% maybe to do
+
+
+# Save
+
+We save the list of DE isoforms :
+
+%%%% ALI : tu pourrais aussi sauvegarder en CSV, si c'est utile
+
+```{r save_sobj}
+saveRDS(switch_markers, file = paste0(out_dir, "/", save_name, "_switch_markers.rds"))
+```
+
+
+# R Session
+
+```{r sessioninfo, echo = FALSE, fold_output = TRUE}
+sessionInfo()
+```
